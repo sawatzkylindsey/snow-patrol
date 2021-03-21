@@ -19,13 +19,13 @@ import model
 TIME_ZONE = pytz.timezone("America/Vancouver")
 
 # Long polling time maximum of every 6 hours -> 4 times a day.
-LONG_POLL = dt.timedelta(hours=1)
-SNOW_POLL = dt.timedelta(minutes=10)
+LONG_POLL = dt.timedelta(hours=6)
+SNOW_POLL = dt.timedelta(hours=1)
 SNOW_THRESHOLD = dt.timedelta(minutes=5)
 EMPTY_DURATION = dt.timedelta()
 CONNECTION_WAIT = dt.timedelta(minutes=5)
 
-INITIAL_SNOWING_MESSAGE = "Congratulations %s, it's FINALLY snowing!  Expecting ~%.2fcm"
+INITIAL_SNOWING_MESSAGE = "Congratulations %s, it's FINALLY snowing (in %s)!  Expecting ~%.2fcm"
 ALREADY_SNOWING_MESSAGES = [
     "What a day - still snowing!",
     "Snow is pure bliss.",
@@ -44,15 +44,17 @@ def main(argv):
     ap = ArgumentParser(prog="snow-patrol daemon")
     ap.add_argument("-v", "--verbose", default=False, action="store_true", help="Turn on verbose logging.")
     ap.add_argument("config_path")
+    ap.add_argument("--dry-run", action="store_true", default=False)
     aargs = ap.parse_args(argv)
-    setup_logging(".%s.log" % os.path.splitext(os.path.basename(__file__))[0], aargs.verbose, False, True, True)
+    log_file = ".%s.%s.log" % (os.path.splitext(os.path.basename(__file__))[0], os.path.basename(aargs.config_path))
+    setup_logging(log_file, aargs.verbose, False, True, True)
     config = model.load(aargs.config_path)
     logging.debug("Running under: %s" % config)
-    run_continuously(config)
+    run_continuously(config, aargs.dry_run)
     return 0
 
 
-def run_continuously(config):
+def run_continuously(config, dry_run):
     #thestorm = dt.datetime(2020, 1, 12, 8)
     #thestorm.isoformat()
     darksky = DarkSky(config.darksky_key)
@@ -60,6 +62,7 @@ def run_continuously(config):
 
     while True:
         now = dt.datetime.now(TIME_ZONE)
+        print(now)
         forecast = get_forecast(darksky, config)
         snow_event = next_snowfall(forecast)
 
@@ -77,7 +80,7 @@ def run_continuously(config):
 
             if duration_estimate < SNOW_THRESHOLD:
                 user_log.info("It's snowing in %s!" % config.location)
-                send_message(snow_event.accumulation, already_snowing, config)
+                send_message(snow_event.accumulation, already_snowing, config, dry_run)
                 next_poll = SNOW_POLL
                 already_snowing = True
             else:
@@ -85,12 +88,12 @@ def run_continuously(config):
                     user_log.info("Stopped")
 
                 already_snowing = False
+                estimate = dt.timedelta(seconds=int(duration_estimate.seconds * 0.2))
 
-                if duration_estimate > LONG_POLL:
+                if estimate > LONG_POLL:
                     # If the next predicted snowfall is too far in the future, cap it off at the long poll duration.
                     next_poll = LONG_POLL
                 else:
-                    estimate = dt.timedelta(seconds=int(duration_estimate.seconds * 0.8))
                     next_poll = max(SNOW_THRESHOLD, estimate)
 
         logging.debug("Sleeping for %s seconds." % next_poll.seconds)
@@ -108,7 +111,7 @@ def get_forecast(darksky, config):
         try:
             forecast = darksky.get_forecast(config.latitude, config.longitude, units=units.SU)
             #forecast = darksky.get_time_machine_forecast(config.latitude, config.longitude, units=units.SU, time=thestorm)
-        except requests.exceptions.ConnectionError as error:
+        except (requests.exceptions.ConnectionError, requests.exceptions.ReadTimeout) as error:
             if tries > 10:
                 tries = 0
                 error_type = type(error)
@@ -124,6 +127,7 @@ def get_forecast(darksky, config):
 
 def next_snowfall(forecast):
     now = dt.datetime.now(TIME_ZONE)
+    print(now)
     event = model.PrecipitationEvent(now, forecast.currently)
     #event = model.PrecipitationEvent(now, ARTIFICIAL_SNOW_POINT)
     logging.debug("currently (darksky %s): %s" % (forecast.currently.time, event))
@@ -131,6 +135,7 @@ def next_snowfall(forecast):
     if event.is_snowing():
         return event
     else:
+        return None
         for i, hour_point in enumerate(forecast.hourly.data):
             event = model.PrecipitationEvent(now + dt.timedelta(hours=i + 1), hour_point)
             logging.debug("hourly %d: %s" % (i, event))
@@ -141,8 +146,8 @@ def next_snowfall(forecast):
         return None
 
 
-def send_message(precip_accumulation, already_snowing, config):
-    message = INITIAL_SNOWING_MESSAGE % (config.name, precip_accumulation)
+def send_message(precip_accumulation, already_snowing, config, dry_run):
+    message = INITIAL_SNOWING_MESSAGE % (config.name, config.location, precip_accumulation)
 
     if already_snowing:
         message = random.choice(ALREADY_SNOWING_MESSAGES)
@@ -150,7 +155,7 @@ def send_message(precip_accumulation, already_snowing, config):
     body = {
       "phone": config.phone_number,
       "message": message,
-      "key": "%s_test" % config.textbelt_key,
+      "key": "%s%s" % (config.textbelt_key, "_test" if dry_run else ""),
     }
     response = requests.post("https://textbelt.com/text", body)
     logging.debug("textbelt: body: %s, response: %s" % (body, response.json()))

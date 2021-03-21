@@ -34,7 +34,10 @@ class PrecipitationEvent:
         self.accumulation = darksky_point.precipAccumulation
 
     def is_snowing(self):
-        return (self.probability >= 0.5 or self.intensity >= 0.2) \
+        print(self)
+        return (self.probability >= 0.5 \
+                or self.intensity >= 0.2 \
+                or (self.accumulation is not None and self.accumulation >= 0.15)) \
             and self.type == "snow"
 
     def __repr__(self):
